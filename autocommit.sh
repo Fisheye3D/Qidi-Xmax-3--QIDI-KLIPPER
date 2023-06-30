@@ -19,16 +19,16 @@ config_folder=~mks/klipper_config
 # older installs
 
 ### Path to your Klipper folder, by default that is '~/klipper'
-klipper_folder=~/klipper
+klipper_folder=~mks/klipper
 
 ### Path to your Moonraker folder, by default that is '~/moonraker'
-moonraker_folder=~/moonraker
+moonraker_folder=~mks/moonraker
 
 ### Path to your Mainsail folder, by default that is '~/mainsail'
-mainsail_folder=~/mainsail
+mainsail_folder=~mks/mainsail
 
 ### Path to your Fluidd folder, by default that is '~/fluidd'
-#fluidd_folder=~/fluidd
+#fluidd_folder=~mks/fluidd
 
 ### The branch of the repository that you want to save your config
 ### By default that is 'master'
