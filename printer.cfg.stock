@@ -22,18 +22,11 @@
 # See docs/Config_Reference.md for a description of parameters.
 [include MKS_THR.cfg]
 [include Adaptive_Mesh.cfg]
-[include config_backup.cfg]
-[include macros.cfg]
-[include mainsail.cfg]
 [mcu]
 # The hardware use USART1 PA10/PA9 connect to RK3328
 #serial: /dev/serial/by-id/usb-Klipper_stm32f407xx_4D0045001850314335393520-if00
 serial: /dev/ttyS0
 restart_method: command
-
-[force_move]
-enable_force_move: True
-
 
 
 #[mcu MKS_THR]
@@ -475,11 +468,10 @@ speed:150               #调平速度
 horizontal_move_z:10   #调平中Z抬高高度
 mesh_min:30,15        #探测点最小位置
 mesh_max:310,310      #探测点最大位置
-probe_count:9,9       #调平点数
+probe_count:8,8      #调平点数
 algorithm:bicubic
-move_check_distance: 3
-#bicubic_tension:0.2
-#mesh_pps: 4, 4
+bicubic_tension:0.2
+mesh_pps: 4, 4
 
 [bltouch]
 sensor_pin:^MKS_THR:gpio21
@@ -508,22 +500,383 @@ accel_chip:adxl345
 probe_points:
     160, 160, 10  # an example
 
+[gcode_macro SHAPER_CALIBRATE]
+rename_existing: RESHAPER_CALIBRATE
+gcode:
+    RESHAPER_CALIBRATE FREQ_START=30 FREQ_END=150
+
+
+[gcode_macro HOT_CALIBRATE_START]
+variable_k: 0
+gcode:
+    {% if k == 0 %}
+        {% if printer['heater_generic hot'].temperature > 49 %}
+            SET_GCODE_VARIABLE MACRO=HOT_CALIBRATE_END VARIABLE=hot_set VALUE=1
+            SET_GCODE_OFFSET Z_ADJUST=-0.05 MOVE=0
+            SET_GCODE_VARIABLE MACRO=HOT_CALIBRATE_START VARIABLE=k VALUE=1
+        {% endif %}
+    {% endif %}
+
+[gcode_macro HOT_CALIBRATE_END]
+variable_hot_set: 0
+gcode:
+    {% if  hot_set == 1 %}
+        SET_GCODE_VARIABLE MACRO=HOT_CALIBRATE_END VARIABLE=hot_set VALUE=0
+        SET_GCODE_OFFSET Z_ADJUST=+0.05 MOVE=0
+        SET_GCODE_VARIABLE MACRO=HOT_CALIBRATE_START VARIABLE=k VALUE=0
+    {% endif %}
+
+[gcode_macro PRINT_START]
+gcode:
+    HOT_CALIBRATE_START
+
+[gcode_macro PRINT_START_QD]
+gcode:
+    HOT_CALIBRATE_START
+
+[gcode_macro CANCEL_PRINT]
+rename_existing: BASE_CANCEL_PRINT
+gcode:
+    {% if (printer.gcode_move.position.z) < 200 %}       ; check that zhop doesn't exceed z max
+        G1 Z200 F600                                         
+    {% endif %}
+
+    G1  X0 Y0 F12000
+
+    SDCARD_RESET_FILE
+    PRINT_END
+    BASE_CANCEL_PRINT
+
+[gcode_macro PRINT_END]
+gcode:
+    M106 P2 S0
+    M106 P0 S0
+    M106 P3 S0  #关闭活性炭风扇
+    
+    M104 S0
+    M140 S0
+    M141 S0
+
+    M220 S100
+    M221 S100
+
+    SET_IDLE_TIMEOUT TIMEOUT={printer.configfile.settings.idle_timeout.timeout} ; set timeout back to configured value
+    CLEAR_PAUSE
+    HOT_CALIBRATE_END
+
+    SET_STEPPER_ENABLE STEPPER=stepper_x enable=0
+	SET_STEPPER_ENABLE STEPPER=stepper_y enable=0
+	SET_STEPPER_ENABLE STEPPER=stepper_z enable=1
+	SET_STEPPER_ENABLE STEPPER=extruder enable=0
+
+    BED_MESH_CLEAR      #恢复调平数据
+    BED_MESH_PROFILE LOAD=default
+    G31
+    BEEP I=2 DUR=500
+
+
+[gcode_macro PRINT_END_POWEROFF]
+gcode:
+       M107
+       M104 S0
+       M140 S0
+       G28 Z
+       M84
+#       BEEP I=2 DUR=500
+       M81	
+
+    
+[temperature_sensor mcu_temp]
+sensor_type: temperature_mcu
+
+
+[temperature_sensor RPI]
+sensor_type: rpi_temperature # alternate def
+sensor_type: temperature_host
+min_temp: 10
+max_temp: 100
+
+
+[gcode_macro PAUSE]
+rename_existing: BASE_PAUSE
+gcode:
+    # Parameters
+    {% set z = params.Z|default(50)|int %}                                                   ; z hop amount
+    
+    {% if printer['pause_resume'].is_paused|int == 0 %}     
+        SET_GCODE_VARIABLE MACRO=RESUME VARIABLE=zhop VALUE={z}                              ; set z hop variable for reference in resume macro
+        SET_GCODE_VARIABLE MACRO=RESUME VARIABLE=etemp VALUE={printer['extruder'].target}    ; set hotend temp variable for reference in resume macro
+                                
+#       SET_FILAMENT_SENSOR SENSOR=fila ENABLE=0                                             ; disable filament sensor       
+        SAVE_GCODE_STATE NAME=PAUSE                                                          ; save current print position for resume                
+        BASE_PAUSE                                                                           ; pause print
+        {% if (printer.gcode_move.position.z + z) < printer.toolhead.axis_maximum.z %}       ; check that zhop doesn't exceed z max
+            G91                                                                              ; relative positioning
+            G1 Z{z} F600                                                                     ; raise Z up by z hop amount
+        {% else %}
+#            { action_respond_info("Pause zhop exceeds maximum Z height.") }                  ; if z max is exceeded, show message and set zhop value for resume to 0
+            SET_GCODE_VARIABLE MACRO=RESUME VARIABLE=zhop VALUE=0
+        {% endif %}
+        SAVE_GCODE_STATE NAME=PAUSEPARK2
+        G90                                                                                  ; absolute positioning
+        G1 X{printer.toolhead.axis_maximum.x/2} Y{printer.toolhead.axis_maximum.y} F6000   ; park toolhead at front center
+        SAVE_GCODE_STATE NAME=PAUSEPARK                                                      ; save parked position in case toolhead is moved during the pause (otherwise the return zhop can error) 
+        M104 S0                                                                              ; turn off hotend
+        SET_IDLE_TIMEOUT TIMEOUT=43200                                                       ; set timeout to 12 hours
+    {% endif %}
+
+
+[gcode_macro RESUME]
+rename_existing: BASE_RESUME
+variable_zhop: 0
+variable_etemp: 0
+gcode:
+    # Parameters
+    {% set e = params.E|default(2.5)|int %}                                          ; hotend prime amount (in mm)
+    
+    {% if printer['pause_resume'].is_paused|int == 1 %}
+#        SET_FILAMENT_SENSOR SENSOR=fila ENABLE=1                          ; enable filament sensor
+        #INITIAL_RGB                                                                    ; reset LCD color
+        SET_IDLE_TIMEOUT TIMEOUT={printer.configfile.settings.idle_timeout.timeout}  ; set timeout back to configured value
+        {% if etemp > 0 %}
+            M109 S{etemp|int}                                                        ; wait for hotend to heat back up
+        {% endif %}
+        RESTORE_GCODE_STATE NAME=PAUSEPARK MOVE=1 MOVE_SPEED=150                     ; go back to parked position in case toolhead was moved during pause (otherwise the return zhop can error)  
+        G91                                                                          ; relative positioning
+        M83                                                                          ; relative extruder positioning
+        {% if printer[printer.toolhead.extruder].temperature >= printer.configfile.settings.extruder.min_extrude_temp %}                                                
+            G1  E{e} F900                                                ; prime nozzle by E, lower Z back down
+#        {% else %}                      
+#            G1 Z{zhop * -1} F900                                                     ; lower Z back down without priming (just in case we are testing the macro with cold hotend)
+        {% endif %}  
+        RESTORE_GCODE_STATE NAME=PAUSEPARK2 MOVE=1 MOVE_SPEED=150                           
+        RESTORE_GCODE_STATE NAME=PAUSE MOVE=1 MOVE_SPEED=10                          ; restore position
+        BASE_RESUME                                                                  ; resume print
+    {% endif %}
+
+[pause_resume]
+
+
+[display_status]
+
+
+
+
+[gcode_macro BEEP]
+gcode:
+    # Parameters
+    {% set i = params.I|default(1)|int %}        ; Iterations (number of times to beep).
+    {% set dur = params.DUR|default(100)|int %}  ; Duration/wait of each beep in ms. Default 100ms.
+
+    {% if printer["output_pin sound"].value|int == 1 %}
+        {% for iteration in range(i|int) %}
+            SET_PIN PIN=beeper VALUE=1
+            G4 P{dur}
+            SET_PIN PIN=beeper VALUE=0
+    		G4 P{dur}
+        {% endfor %}
+    {% endif %}
+
+
+
+
+#[gcode_macro _CG28]
+#gcode:
+#    {% if "xyz" not in printer.toolhead.homed_axes %}
+#        G28
+#    {% endif %}
+
+
+
+
+[gcode_macro G30]
+gcode:
+    BED_MESH_CLEAR      #清除调平数据
+#    G28 
+    BED_MESH_CALIBRATE mesh_min=10,10  mesh_max=310,310  METHOD=manual #手动动调平
+
+
+
+[gcode_macro M141]
+gcode:
+      SET_HEATER_TEMPERATURE HEATER=hot TARGET={params.S}
+
+    
+[gcode_macro M106]
+gcode:
+    {% if params.P is defined %}
+      {% if params.S is defined %}
+        SET_PIN PIN=fan{params.P|int} VALUE={params.S|int}
+      {% else %}
+        SET_PIN PIN=fan{params.P|int} VALUE=255
+      {% endif %}
+    {% endif %} 
+
+    {% if params.T is defined %}
+        {% if (params.T|int)==-2 %}
+          {% if params.S is defined %}       
+            SET_PIN PIN=fan3 VALUE={params.S|int}
+          {% else %}
+            SET_PIN PIN=fan3 VALUE=255
+          {% endif %}
+        {% endif %}
+    {% endif %}
+
+    {% if params.P is undefined %}
+    {% if params.T is undefined %}
+    {% if params.S is defined %}
+            SET_PIN PIN=fan0 VALUE={params.S|int}
+       {% else %}
+            SET_PIN PIN=fan0 VALUE=255       
+    {% endif %}
+    {% endif %}
+    {% endif %}
+
+
+
+[gcode_macro M107]
+gcode:  
+    SET_PIN PIN=fan0 VALUE=0 
+#    SET_PIN PIN=fan1 VALUE=0
+#    SET_PIN PIN=fan2 VALUE=0 
+
+[gcode_macro M303]
+gcode:
+    {% if params.E is defined %}
+     {% if params.S is defined %}
+        {% if (params.E|int)==-1 %} 
+         PID_CALIBRATE HEATER=heater_bed TARGET={params.S|int}
+        {% endif %}
+        {% if (params.E|int)==0 %}
+         PID_CALIBRATE HEATER=extruder TARGET={params.S|int}
+        {% endif %}
+     {% endif %}
+  {% endif %}
+
+
+[gcode_macro M8029]
+gcode:
+     {% if params.D is defined %}
+       {% if (params.D|int)==1 %} 
+        SET_FILAMENT_SENSOR SENSOR=fila  ENABLE=1
+       {% endif %}
+       {% if (params.D|int)==0 %} 
+        SET_FILAMENT_SENSOR SENSOR=fila  ENABLE=0
+       {% endif %}
+     {% endif %}
+
+     
+[gcode_macro M900]
+gcode:
+    {% if params.K is defined %} 
+          SET_PRESSURE_ADVANCE ADVANCE={params.K}
+    {% endif %}  
+    {% if params.T is defined %}    
+       SET_PRESSURE_ADVANCE SMOOTH_TIME={params.T}
+    {% endif %} 
+
+
+[gcode_macro M290]
+gcode:
+   SET_GCODE_OFFSET Z_ADJUST={params.Z}
+
+[gcode_macro M901]
+gcode:
+    G28
+    SHAPER_CALIBRATE
+
+[gcode_macro M81]
+description: PowerOff
+gcode: 
+  M84
+  SET_PIN PIN=pwc VALUE=0
+
+
+
+       
+[gcode_macro M0]
+gcode:
+    PAUSE
+
+[gcode_macro M25]
+rename_existing: M9925
+gcode:
+    PAUSE
+
+
+    
+[output_pin sound]
+pin: PA13
+value:1
+
+
+[gcode_macro beep_on]
+gcode:
+    SET_PIN PIN=sound VALUE=1
+    
+[gcode_macro beep_off]
+gcode:
+    SET_PIN PIN=sound VALUE=0
+
+
+[gcode_arcs]
+resolution: 1.0
+
+[gcode_macro M109]
+rename_existing: M99109
+gcode:
+    #Parameters
+    {% set s = params.S|float %}
+    
+    M104 {% for p in params %}{'%s%s' % (p, params[p])}{% endfor %}  ; Set hotend temp
+    {% if s != 0 %}
+        TEMPERATURE_WAIT SENSOR=extruder MINIMUM={s} MAXIMUM={s+1}   ; Wait for hotend temp (within 1 degree)
+    {% endif %}
+    
+
+[gcode_macro M4029]
+gcode:
+    BED_MESH_CLEAR
+    G28
+    G1 X{printer.toolhead.axis_maximum.x/2 - printer.probe["x_offset"]} Y{printer.toolhead.axis_maximum.y/2 - printer.probe["y_offset"]} F7800
+    G1 Z15 F600
+    ABORT
+    PROBE_CALIBRATE
+    TESTZ Z=-3.0
+
+[gcode_macro M603]
+description: filament unlode
+gcode:
+    G92 E0
+    G0  E15 F400
+    G4  P1000
+    G92 E0
+    G1  E-80 F800
+
+
 #####################################新增KAMP调平
 [exclude_object]
+
 [gcode_macro G31]
 gcode:
     SET_GCODE_VARIABLE MACRO=G29 VARIABLE=k VALUE=1
+
 [gcode_macro G32]
 gcode:
     SET_GCODE_VARIABLE MACRO=G29 VARIABLE=k VALUE=0
+
+
 [gcode_macro G29]
 variable_k:1
 gcode:
+
     {% if k|int==1 %}
         BED_MESH_CLEAR      #清除调平数据
-#    G28  
+#    G28   
         BED_MESH_CALIBRATE PROFILE=kamp  #自动调平
     {% endif %}
+
+
 [gcode_macro M204]
 rename_existing: M99204
 gcode:
@@ -535,9 +888,9 @@ gcode:
         {% set s = [params.P|float ,params.T|float] | min %}
     {% endif %}
     {% endif %}
+
     SET_VELOCITY_LIMIT ACCEL={s}
     SET_VELOCITY_LIMIT ACCEL_TO_DECEL={s/2}
-
 
 
 [idle_timeout]
@@ -548,46 +901,36 @@ timeout: 5400
 serial: /tmp/klipper_host_mcu
 
 
-#[x_twist_compensation]
-#speed: 150
+[x_twist_compensation]
+speed: 150
 #   The speed (in mm/s) of non-probing moves during the calibration.
 #   The default is 50.
-#horizontal_move_z: 10
+horizontal_move_z: 10
 #   The height (in mm) that the head should be commanded to move to
 #   just prior to starting a probe operation. The default is 5.
-#start_x: 15
+start_x: 15
 #   Defines the minimum X coordinate of the calibration
 #   This should be the X coordinate that positions the nozzle at the starting
 #   calibration position. This parameter must be provided.
-#end_x: 260
+end_x: 260
 #   Defines the maximum X coordinate of the calibration
 #   This should be the X coordinate that positions the nozzle at the ending
 #   calibration position. This parameter must be provided.
-#y: 140
+y: 140
 #   Defines the Y coordinate of the calibration
 #   This should be the Y coordinate that positions the nozzle during the
 #   calibration process. This parameter must be provided and is recommended to
 #   be near the center of the bed
 
-#[gcode_macro M1029]
-#gcode:
-  #X_TWIST_PROFILE_LOAD NAME=default
-  #X_TWIST_COMPENSATE_MESH MESH_NAME=default COMPENSATION_NAME=default
-   # SAVE_CONFIG
+[gcode_macro M1029]
+gcode:
+    X_TWIST_PROFILE_LOAD NAME=default
+    X_TWIST_COMPENSATE_MESH MESH_NAME=default COMPENSATION_NAME=default
+#    SAVE_CONFIG
 
 [virtual_sdcard]
 #path:/home/mks/uploads
 path: ~/gcode_files
-
-
-[temperature_sensor RPI]
-sensor_type: rpi_temperature # alternate def
-sensor_type: temperature_host
-min_temp: 10
-max_temp: 100
-
-[temperature_sensor mcu_temp]
-sensor_type: temperature_mcu
 
 #*# <---------------------- SAVE_CONFIG ---------------------->
 #*# DO NOT EDIT THIS BLOCK OR BELOW. The contents are auto-generated.
@@ -604,28 +947,3 @@ sensor_type: temperature_mcu
 #*# shaper_freq_x = 53.8
 #*# shaper_type_y = mzv
 #*# shaper_freq_y = 43.4
-#*#
-#*# [bed_mesh default]
-#*# version = 1
-#*# points =
-#*# 	  0.157500, 0.227500, 0.261667, 0.232500, 0.208333, 0.101667, 0.299167, 0.356667, 0.362500, 0.332500, 0.212500
-#*# 	  0.222500, 0.230000, 0.267500, 0.281667, 0.218333, 0.186667, 0.246667, 0.328333, 0.335000, 0.347500, 0.340833
-#*# 	  0.228333, 0.265000, 0.285000, 0.276667, 0.260000, 0.269167, 0.286667, 0.348333, 0.383333, 0.376667, 0.435833
-#*# 	  0.208333, 0.263333, 0.265833, 0.267500, 0.250833, 0.286667, 0.314167, 0.357500, 0.426667, 0.411667, 0.435833
-#*# 	  0.107500, 0.162500, 0.213333, 0.234167, 0.189167, 0.149167, 0.220000, 0.319167, 0.418333, 0.385833, 0.338333
-#*# 	  -0.023333, 0.128333, 0.172500, 0.187500, 0.120000, 0.030833, 0.131667, 0.273333, 0.315000, 0.280000, 0.177500
-#*# 	  -0.002500, 0.054167, 0.105833, 0.160000, 0.112500, 0.075833, 0.123333, 0.177500, 0.251667, 0.245833, 0.260000
-#*# 	  -0.090000, -0.028333, -0.015000, -0.010000, -0.009167, 0.008333, 0.008333, 0.030833, 0.080000, 0.105000, 0.167500
-#*# 	  -0.125000, -0.122500, -0.105000, -0.089167, -0.080000, -0.075000, -0.067500, -0.066667, -0.028333, 0.037500, 0.080833
-#*# 	  -0.289167, -0.270833, -0.267500, -0.255000, -0.211667, -0.231667, -0.214167, -0.168333, -0.143333, -0.100000, -0.080833
-#*# 	  -0.522500, -0.418333, -0.348333, -0.350833, -0.352500, -0.342500, -0.243333, -0.187500, -0.159167, -0.130000, -0.238333
-#*# tension = 0.2
-#*# min_x = 30.0
-#*# algo = bicubic
-#*# y_count = 11
-#*# mesh_y_pps = 4
-#*# min_y = 15.0
-#*# x_count = 11
-#*# max_y = 310.0
-#*# mesh_x_pps = 4
-#*# max_x = 310.0
