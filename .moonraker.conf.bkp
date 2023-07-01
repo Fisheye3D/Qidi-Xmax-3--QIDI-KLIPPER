@@ -27,6 +27,7 @@ database_path = /home/mks/.moonraker_database
 [file_manager]
 config_path = /home/mks/klipper_config
 log_path = /home/mks/klipper_logs
+enable_object_processing = True
 
 [octoprint_compat]
 
