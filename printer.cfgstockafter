@@ -178,7 +178,7 @@ enable_pin: !PC11
 microsteps: 16
 rotation_distance: 8
 full_steps_per_rotation: 200
-endstop_pin:probe:z_virtual_endstop#!PC3 #for Z-max; endstop have'!' is NO
+endstop_pin:probe:z_virtual_endstop #!PC3 #for Z-max; endstop have'!' is NO
 #position_endstop:326
 position_max:325
 position_min: -6
