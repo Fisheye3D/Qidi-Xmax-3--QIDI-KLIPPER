@@ -21,7 +21,7 @@ camera=usb
 #
 # Defaults to a resolution of 640x480 px and a framerate of 10 fps
 #
-camera_usb_options="-d /dev/video4 -r 1920x1080 -f 15"
+camera_usb_options="-d /dev/video4 -r 1280x720 -f 15"
 
 ### Additional webcam devices known to cause problems with -f
 #
